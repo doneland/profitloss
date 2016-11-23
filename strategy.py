@@ -2,56 +2,68 @@
 from datetime import datetime
 from datetime import timedelta
 
+from transaction import Transaction
+
+
 class Strategy(object):
 
     def __init__(self, start_amount, sl=0.01, tpmulti=2):
         self.options = {
-            'start_amount': 10000,
-            'sl': sl,
+            'start_amount': start_amount,
+            'stop_loss': sl,
             'tpmulti': tpmulti,
             'transaction_size': 10,
-            'max_open': 10
+            'max_open_positions': 10
         }
 
         self.stats = {
             'trades_count': 0,
-            'profitable_count': 0,
-            'loss_count': 0,
-            'amount_highest': 0,
-            'amount_lowest': 0,
-            'max_in_row_profit': 0,
-            'max_in_row_loss': 0
+            'positive_count': 0,
+            'negative_count': 0,
+            'balance_highest': 0,
+            'balance_lowest': 0,
+            'positive_max_in_row': 0,
+            'negative_max_in_row': 0
         }
 
         self.status = {
-            'current_value': self.options['start_amount'],
-            'open_trades_count': 0
+            'remaining_amount': self.options['start_amount'],
+            'open_trades_count': 0,
+            'closed_trades_count': 0,
         }
 
         # All trades
         self.trades = []
-        # All amount values during the trading period.
-        self.amounts = []
+        # Balances
+        self.balances = []
+        # Current price.
+        self.current_price = None
 
-    def stream_price(self, price): 
+    def stream_price(self, price):
         """
         Stream price. Go through each trade in self.trades and provide this price.
         Trade should know from the price whether it should be closed or left without 
         changes.
         """
+
+        # Cache current price.
+        self.current_price = price
+
+        # Adopt closing strategies for open trades in the book.
         for trade in self.trades:
             if trade.get('closed') == False:
                 self.close_strategy(trade, price)
-        
-        # Update parameters of strategy.
-        self.update()
+
         # Check enter strategy.
         self.enter_strategy(price)
-        
+
+        # Update parameters of strategy.
+        self.update()
+        self.calc_balance()
 
     def close_strategy(self, trade, price):
         """
-        Check validity of trade according price provided.
+        Check and close trades that reached stop loss or take profit values. 
         """
         sl = trade.get('stop_loss_price')
         tp = trade.get('take_profit_price')
@@ -59,16 +71,15 @@ class Strategy(object):
 
         if trx_type == 'BUY':
             if sl >= price.get('value'):
-                trade.close(price)
+                trade.close(price, 'SL')
             elif tp <= price.get('value'):
-                trade.close(price)
-        
+                trade.close(price, 'TP')
+
         if trx_type == 'SELL':
             if sl <= price.get('value'):
-                trade.close(price)
+                trade.close(price, 'SL')
             elif tp >= price.get('value'):
-                trade.close(price)
-
+                trade.close(price, 'TP')
 
     def enter_strategy(self, price):
         """
@@ -76,7 +87,8 @@ class Strategy(object):
         """
         trx_size = self.options['transaction_size']
         trx_amount = price.get('value') * trx_size
-        stop_loss_diff = (self.options['stop_loss'] * self.options['start_amount']) / trx_size
+        stop_loss_diff = (self.options['stop_loss']
+                          * self.options['start_amount']) / trx_size
         take_profit_diff = stop_loss_diff * self.options['tpmulti']
 
         # If transaction value is larger than remaining amount in portfolio,
@@ -86,53 +98,54 @@ class Strategy(object):
 
         # TODO: Add restriction for open positions.
         trx = Transaction({
-                'type': 'BUY',
-                'entry_price': price.get('value'),
-                'stop_loss_price': price.get('value') - stop_loss_diff,
-                'take_profit_price': price.get('value') + take_profit_diff,
-                'quantity': trx_size,
-                'create_date': price.get('date') - timedelta(minutes=30)
-            })
+            'type': 'BUY',
+            'entry_price': price.get('value'),
+            'stop_loss_price': price.get('value') - stop_loss_diff,
+            'take_profit_price': price.get('value') + take_profit_diff,
+            'quantity': trx_size,
+            'entry_date': price.get('date')
+        })
 
         # Add transaction
         self.add_trade(trx)
-        # Update all the props and statistics.
-        self.update()
 
     def add_trade(self, transaction):
         """
         Add transaction as trade in self.trade.
         """
         self.trades.append(transaction)
-        self.update()
 
     def update(self):
         """
         Method updates status, statistics and etc.
         """
-        self.calc_stats()
-        self.update_state()
+        self.calc_status()
 
     def calc_stats(self):
-        pass
+        self.stats['trades_count'] = len(self.trades)
+        return self.stats
 
-    def update_state(self):
-        remaining_amount = self.options['start_amount']
-        total_amount = self.options['start_amount']
-
+    def calc_balance(self):
+        balance = self.options['start_amount']
         for t in self.trades:
             if t.get('closed') == False:
-                remaining_amount -= t.get('enter_amount')
-                total_amount += t.change(price)
-                self.amounts.append(remaining_amount)
-            else: 
-                remaining_amount += t.get('close_amount')
-                self.amounts.append(remaining_amount)
+                balance += t.get_pl(self.current_price)
+            else:
+                balance += t.get('close_pl')
+        self.balances.append(balance)
 
+    def calc_status(self):
+        # Remaining amount shows how much remain money for the next trade.
+        remaining_amount = self.options['start_amount']
+        open_trades = 0
+        closed_trades = 0
+        for t in self.trades:
+            if t.get('closed') == False:
+                remaining_amount -= t.get('entry_amount')
+                open_trades += 1
+            else:
+                closed_trades += 1
+                remaining_amount += t.get('close_pl')
         self.status['remaining_amount'] = remaining_amount
-
-
-
-
-
-        
+        self.status['open_trades_count'] = open_trades
+        self.status['closed_trades_count'] = closed_trades
